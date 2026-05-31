@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Super SAVO Brothers - Complete Edition</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #2c3e50;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            font-family: 'Arial', sans-serif;
+            color: white;
+            user-select: none;
+        }
+        h1 {
+            margin: 10px 0 5px 0;
+            text-shadow: 2px 2px #000;
+        }
+        canvas {
+            background: #5c94fc; 
+            border: 4px solid #fff;
+            box-shadow: 0px 10px 20px rgba(0,0,0,0.5);
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Super SAVO Brothers</h1>
+    <div style="margin-bottom: 10px; color: #bdc3c7;">Click the game screen once to enable sound engines!</div>
+    
+    <canvas id="gameCanvas" width="800" height="450"></canvas>
+
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+
+        const GRAVITY = 0.6;
+        const GROUND_Y = 380;
+
+        // Game States: 'LOADING', 'MENU', 'PLAYING', 'CUTSCENE', 'GAMEOVER'
+        let gameState = 'LOADING';
+        let loadingProgress = 0;
+
+        // Cutscene Timers & Animation States
+        let cutsceneTimer = 0;
+        let tubeY = -300; 
+        let ardaSuckY = 0; // Tracks Arda being pulled up into the tube
+
+        // Web Audio Context Setup
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        function playSound(type) {
+            if (audioCtx.state === 'suspended') return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain); gain.connect(audioCtx.destination);
+
+            if (type === 'gun') {
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(500, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(80, audioCtx.currentTime + 0.12);
+                gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+                gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.12);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.12);
+            } else if (type === 'coinBag' || type === 'coin') {
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(type === 'coinBag' ? 700 : 1100, audioCtx.currentTime);
+                gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+            } else if (type === 'jump') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(160, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(380, audioCtx.currentTime + 0.12);
+                gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+                gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.12);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.12);
+            } else if (type === 'hit' || type === 'break' || type === 'slam') {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(type === 'slam' ? 70 : (type === 'break' ? 180 : 100), audioCtx.currentTime);
+                gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+                gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.15);
+                osc.start(); osc.stop(audioCtx.currentTime + 0.15);
+            } else if (type === 'victory') {
+                let notes = [261.6, 329.6, 392.0, 523.3, 659.3];
+                notes.forEach((f, i) => {
+                    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+                    o.type = 'triangle'; o.frequency.value = f; o.connect(g); g.connect(audioCtx.destination);
+                    g.gain.setValueAtTime(0.1, audioCtx.currentTime + i * 0.08);
+                    g.gain.linearRampToValueAtTime(0, audioCtx.currentTime + i * 0.08 + 0.2);
+                    o.start(audioCtx.currentTime + i * 0.08); o.stop(audioCtx.currentTime + i * 0.08 + 0.2);
+                });
+            }
+        }
+
+        // Entity Arrays
+        let bullets = [];
+        let coinBags = [];
+        let miniCoins = []; 
+
+        // Characters Setup
+        const vlad = {
+            x: 80, y: GROUND_Y, vx: 0, vy: 0, isJumping: false, 
+            color: "#ff6a00", type: "vlad_hat", name: "Vlad", dead: false, isAttacking: 0
+        };
+
+        const oliver = {
+            x: 140, y: GROUND_Y, vx: 0, vy: 0, isJumping: false, 
+            color: "#6d4c41", type: "oliver_hair", name: "Oliver", dead: false, isAttacking: 0
+        };
+
+        const arda = {
+            x: 520, y: GROUND_Y, color: "#00e5ff", name: "GIANT ARDA",
+            dir: -1, speed: 1.8, pencilAngle: 0, hp: 100, maxHp: 100, dead: false, fallAngle: 0
+        };
+
+        const sirac = {
+            x: 740, y: GROUND_Y - 95, vy: 0, isJumping: false, color: "#ff1744", type: "sirac_hat", name: "Sirac",
+            isCelebrating: false, walkDownProgress: 0
+        };
+
+        // Sirac's Cell Destructible Health
+        const cellGate = {
+            x: 690, y: GROUND_Y - 150, width: 100, height: 90,
+            hp: 40, maxHp: 40, broken: false
+        };
+
+        let drawnLines = [];
+        const keys = {};
+
+        window.addEventListener("click", () => { if(audioCtx.state === 'suspended') audioCtx.resume(); });
+        
+        window.addEventListener("keydown", (e) => { 
+            keys[e.key] = true; 
+            
+            if (e.key === "Enter") {
+                if (gameState === 'LOADING' && loadingProgress >= 100) {
+                    gameState = 'MENU';
+                } else if (gameState === 'MENU') {
+                    gameState = 'PLAYING';
+                }
+            }
+
+            if (gameState === 'PLAYING') {
+                if (e.key === "Shift" && !vlad.dead && vlad.isAttacking === 0) {
+                    vlad.isAttacking = 10;
+                    playSound('coinBag');
+                    coinBags.push({ x: vlad.x + 10, y: vlad.y - 20, vx: 6, vy: -8 });
+                }
+                if ((e.key === "q" || e.key === "Q") && !oliver.dead && oliver.isAttacking === 0) {
+                    oliver.isAttacking = 8;
+                    playSound('gun');
+                    bullets.push({ x: oliver.x + 20, y: oliver.y - 22, vx: 9 });
+                }
+            }
+        });
+        window.addEventListener("keyup", (e) => { keys[e.key] = false; });
+
+        function updateCharacter(char, moveLeft, moveRight, jumpKey) {
+            if (char.dead || gameState === 'CUTSCENE') return;
+
+            if (keys[moveLeft]) char.vx = -4;
+            else if (keys[moveRight]) char.vx = 4;
+            else char.vx = 0;
+
+            if (keys[jumpKey] && !char.isJumping) {
+                char.vy = -12;
+                char.isJumping = true;
+                playSound('jump');
+            }
+
+            char.y += char.vy;
+            char.vy += GRAVITY;
+
+            if (char.y >= GROUND_Y) {
+                char.y = GROUND_Y;
+                char.vy = 0;
+                char.isJumping = false;
+            }
+
+            char.x += char.vx;
+            if (char.x < 20) char.x = 20;
+            if (char.x > canvas.width - 20) char.x = canvas.width - 20;
+
+            if (char.isAttacking > 0) char.isAttacking--;
+        }
+
+        function hitBoss(damage) {
+            if (arda.dead) return;
+            arda.hp -= damage;
+            playSound('hit');
+            if (arda.hp <= 0) {
+                arda.hp = 0;
+                arda.dead = true;
+                drawnLines = []; 
+            }
+        }
+
+        function hitCellGate(damage) {
+            if (!arda.dead || cellGate.broken) return;
+            cellGate.hp -= damage;
+            playSound('break');
+            if (cellGate.hp <= 0) {
+                cellGate.hp = 0;
+                cellGate.broken = true;
+                gameState = 'CUTSCENE'; 
+                cutsceneTimer = 0;
+                tubeY = -300;
+                ardaSuckY = 0;
+            }
+        }
+
+        function triggerCoinSplash(x, y) {
+            for (let i = 0; i < 6; i++) {
+                miniCoins.push({
+                    x: x, y: y,
+                    vx: (Math.random() - 0.5) * 6,
+                    vy: -Math.random() * 5 - 2,
+                    bounces: 0
+                });
+            }
+        }
+
+        function drawSketchStickman(player, customScale = 1) {
+            if (player.dead) return;
+            let x = player.x; let y = player.y; let featureColor = player.color; let type = player.type; let name = player.name;
+
+            ctx.lineWidth = 5 * customScale; ctx.strokeStyle = "#000000"; ctx.lineCap = "round";
+
+            // Head filled clean white
+            ctx.fillStyle = "#ffffff";
+            ctx.beginPath(); ctx.arc(x, y - (40 * customScale), 12 * customScale, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+            // Eyes and mouth lines
+            ctx.lineWidth = 2 * customScale;
+            ctx.strokeStyle = "#000000";
+            ctx.beginPath(); ctx.moveTo(x - (4 * customScale), y - (44 * customScale)); ctx.lineTo(x - (4 * customScale), y - (38 * customScale)); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x + (2 * customScale), y - (44 * customScale)); ctx.lineTo(x + (2 * customScale), y - (38 * customScale)); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x - (3 * customScale), y - (34 * customScale)); ctx.lineTo(x + (3 * customScale), y - (34 * customScale)); ctx.stroke();
+
+            ctx.lineWidth = 5 * customScale; 
+
+            // Head Accessories
+            if (type === "vlad_hat") {
+                ctx.fillStyle = featureColor; ctx.beginPath(); ctx.arc(x, y - 48, 12, Math.PI, 0); ctx.fill();
+                ctx.fillRect(x - 16, y - 50, 26, 4);
+            } else if (type === "oliver_hair") {
+                ctx.fillStyle = featureColor; ctx.beginPath(); ctx.arc(x, y - 44, 13, Math.PI, 0); ctx.fill(); ctx.stroke();
+            } else if (type === "sirac_hat") {
+                ctx.fillStyle = featureColor; ctx.beginPath(); ctx.arc(x, y - (49 * customScale), 11 * customScale, Math.PI * 1.1, Math.PI * 1.9); ctx.fill();
+                ctx.fillRect(x - (12 * customScale), y - (50 * customScale), 24 * customScale, 4 * customScale);
+            }
+
+            // Spine
+            ctx.beginPath(); ctx.moveTo(x, y - (28 * customScale)); ctx.lineTo(x, y - (5 * customScale)); ctx.stroke();
+
+            // Arms
+            ctx.beginPath();
+            if (type === "oliver_hair" && gameState === 'PLAYING') {
+                ctx.moveTo(x, y - 22); ctx.lineTo(x - 14, y - 12);
+                ctx.moveTo(x, y - 22); ctx.lineTo(x + 16, y - 24); ctx.stroke();
+                ctx.fillStyle = "#333"; ctx.fillRect(x + 16, y - 28, 12, 6); ctx.fillRect(x + 16, y - 24, 4, 6); 
+            } else if (type === "vlad_hat" && player.isAttacking > 0 && gameState === 'PLAYING') {
+                ctx.moveTo(x, y - 22); ctx.lineTo(x - 12, y - 12);
+                ctx.moveTo(x, y - 22); ctx.lineTo(x + 22, y - 32); ctx.stroke();
+            } else {
+                ctx.moveTo(x, y - (22 * customScale)); ctx.lineTo(x - (16 * customScale), y - (10 * customScale));
+                ctx.moveTo(x, y - (22 * customScale)); ctx.lineTo(x + (16 * customScale), y - (10 * customScale)); ctx.stroke();
+            }
+
+            // Legs
+            ctx.beginPath(); ctx.moveTo(x, y - (5 * customScale)); ctx.lineTo(x - (14 * customScale), y + (18 * customScale)); ctx.moveTo(x, y - (5 * customScale)); ctx.lineTo(x + (14 * customScale), y + (18 * customScale)); ctx.stroke();
+            ctx.fillStyle = "black"; ctx.font = `bold ${14 * customScale}px Arial`; ctx.textAlign = "center"; ctx.fillText(name, x, y - (68 * customScale));
+        }
+
+        function drawGiantArda() {
+            let scale = 2.2; let x = arda.x; let y = arda.y - ardaSuckY; // Applied suck animation lift offset
+            ctx.save();
+            if (arda.dead) {
+                ctx.translate(x, y + 15);
+                // Reduce tilt during suction sequence so he enters straight
+                let angle = ardaSuckY > 0 ? arda.fallAngle * 0.2 : arda.fallAngle;
+                if (arda.fallAngle < Math.PI / 2) arda.fallAngle += 0.08;
+                ctx.rotate(angle);
+                ctx.translate(-x, -(y + 15));
+            }
+
+            ctx.lineWidth = 5 * scale; ctx.strokeStyle = "#000000";
+            
+            // White interior face
+            ctx.fillStyle = "#ffffff";
+            ctx.beginPath(); ctx.arc(x, y - (40 * scale), 12 * scale, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+            // Face Details
+            ctx.lineWidth = 2 * scale;
+            ctx.beginPath(); ctx.moveTo(x - (4 * scale), y - (44 * scale)); ctx.lineTo(x - (4 * scale), y - (38 * scale)); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x + (2 * scale), y - (44 * scale)); ctx.lineTo(x + (2 * scale), y - (38 * scale)); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x - (3 * scale), y - (34 * scale)); ctx.lineTo(x + (3 * scale), y - (34 * scale)); ctx.stroke();
+            ctx.lineWidth = 5 * scale;
+
+            ctx.fillStyle = arda.color; ctx.beginPath(); ctx.arc(x, y - (49 * scale), 13 * scale, Math.PI, 0); ctx.fill();
+            ctx.fillRect(x - (18 * scale), y - (50 * scale), 36 * scale, 6);
+            ctx.beginPath(); ctx.moveTo(x, y - (28 * scale)); ctx.lineTo(x, y - (5 * scale)); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x, y - (22 * scale)); ctx.lineTo(x - (25 * scale), y - (5 * scale)); ctx.stroke();
+            
+            let handX = x + (25 * scale); let handY = y - (5 * scale);
+            ctx.beginPath(); ctx.moveTo(x, y - (22 * scale)); ctx.lineTo(handX, handY); ctx.stroke();
+
+            if (!arda.dead) {
+                arda.pencilAngle += 0.05;
+                let pencilTipX = handX + Math.sin(arda.pencilAngle) * 20;
+                let pencilTipY = GROUND_Y + 15; 
+                ctx.lineWidth = 8; ctx.strokeStyle = "#e67e22"; ctx.beginPath(); ctx.moveTo(handX, handY); ctx.lineTo(pencilTipX, pencilTipY); ctx.stroke();
+                ctx.lineWidth = 8; ctx.strokeStyle = "#000"; ctx.beginPath(); ctx.moveTo(pencilTipX - 2, pencilTipY - 4); ctx.lineTo(pencilTipX, pencilTipY); ctx.stroke();
+
+                if (Math.random() < 0.4 && arda.x > 250 && arda.x < 620) {
+                    drawnLines.push({x: pencilTipX, y: pencilTipY, r: 10});
+                }
+            }
+
+            ctx.lineWidth = 5 * scale; ctx.strokeStyle = "#000000";
+            ctx.beginPath(); ctx.moveTo(x, y - (5 * scale)); ctx.lineTo(x - (14 * scale), y + (18 * scale)); ctx.moveTo(x, y - (5 * scale)); ctx.lineTo(x + (14 * scale), y + (18 * scale)); ctx.stroke();
+            ctx.fillStyle = arda.dead ? "gray" : "red"; ctx.font = "bold 20px Arial"; ctx.textAlign = "center";
+            ctx.fillText(arda.dead ? "DEFEATED" : arda.name, x, y - 120);
+            ctx.restore();
+
+            if (!arda.dead) {
+                ctx.fillStyle = "#c0392b"; ctx.fillRect(canvas.width / 2 - 100, 20, 200, 15);
+                ctx.fillStyle = "#2ecc71"; ctx.fillRect(canvas.width / 2 - 100, 20, (arda.hp / arda.maxHp) * 200, 15);
+                ctx.strokeStyle = "#000"; ctx.lineWidth = 2; ctx.strokeRect(canvas.width / 2 - 100, 20, 200, 15);
+            }
+        }
+
+        function checkCollision(player, targetX, targetY, radius) {
+            let distX = player.x - targetX; let distY = (player.y - 20) - targetY; 
+            return Math.sqrt(distX*distX + distY*distY) < radius;
+        }
+
+        function handleCutscene() {
+            cutsceneTimer++;
+
+            // Gather Heroes together
+            let targetVladX = 180, targetOliverX = 240, targetSiracX = 300;
+            
+            vlad.x += (targetVladX - vlad.x) * 0.05;
+            oliver.x += (targetOliverX - oliver.x) * 0.05;
+            
+            if (sirac.walkDownProgress < 1) {
+                sirac.walkDownProgress += 0.02;
+                sirac.x = 740 - (sirac.walkDownProgress * 440);
+                sirac.y = (GROUND_Y - 95) + (sirac.walkDownProgress * 95);
+            } else {
+                sirac.x += (targetSiracX - sirac.x) * 0.05;
+            }
+
+            // Continuous jump celebration for freed squad
+            [vlad, oliver, sirac].forEach(char => {
+                if (char.y >= GROUND_Y && Math.random() < 0.08) {
+                    char.vy = -11;
+                    playSound('jump');
+                }
+                char.y += char.vy;
+                char.vy += GRAVITY;
+                if (char.y >= GROUND_Y) {
+                    char.y = GROUND_Y;
+                    char.vy = 0;
+                }
+            });
+
+            // Pipe falls from sky
+            let tubeTargetY = GROUND_Y - 145;
+            if (tubeY < tubeTargetY) {
+                tubeY += 5;
+                if (tubeY >= tubeTargetY) {
+                    tubeY = tubeTargetY;
+                    playSound('slam');
+                }
+            }
+
+            // Once the pipe stands perfectly on the ground, trigger vacuum suction lift
+            if (tubeY === tubeTargetY && cutsceneTimer > 70) {
+                if (ardaSuckY < 95) {
+                    ardaSuckY += 2.5; // Slowly pulls him up into the pipe frame
+                }
+            }
+
+            // Render entities inside cutscene frame bounds
+            drawSketchStickman(vlad, 1);
+            drawSketchStickman(oliver, 1);
+            
+            // Draw Arda's "NOOOOOOOOO" Speech Bubble (disappears as he disappears inside)
+            if (cutsceneTimer > 20 && cutsceneTimer < 90) {
+                let bubbleX = arda.x - 100;
+                let bubbleY = arda.y - 120;
+                
+                ctx.fillStyle = "white"; ctx.strokeStyle = "black"; ctx.lineWidth = 3;
+                ctx.beginPath(); ctx.ellipse(bubbleX, bubbleY, 110, 30, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                
+                ctx.beginPath();
+                ctx.moveTo(bubbleX + 40, bubbleY + 25);
+                ctx.lineTo(arda.x, arda.y - 50);
+                ctx.lineTo(bubbleX + 20, bubbleY + 28);
+                ctx.fillStyle = "white"; ctx.fill(); ctx.stroke();
+
+                ctx.fillStyle = "black"; ctx.font = "bold 16px Arial"; ctx.textAlign = "center";
+                ctx.fillText("NOOOOOOOOOOOOOOOO", bubbleX, bubbleY + 5);
+            }
+
+            drawGiantArda(); 
+            drawSketchStickman(sirac, 1);
+
+            // --- RENDER BRIGHT GREEN WARP PIPE ---
+            ctx.save();
+            // Clip context screen region so Arda gets masked hidden if pulled past top of pipe mouth base rim
+            ctx.fillStyle = "#2ecc71"; // Bright retro green
+            ctx.strokeStyle = "#1b5e20"; // Dark classic green stroke trim outline
+            ctx.lineWidth = 5;
+
+            // Main Pipe Vertical Body Base Cylindrical column
+            ctx.fillRect(arda.x - 65, tubeY + 30, 130, 135);
+            ctx.strokeRect(arda.x - 65, tubeY + 30, 130, 135);
+
+            // Pipe Mouth Lip Top Rim Unit
+            ctx.fillRect(arda.x - 75, tubeY, 150, 32);
+            ctx.strokeRect(arda.x - 75, tubeY, 150, 32);
+
+            // Retro Pipe highlights/shadow vertical design slots
+            ctx.fillStyle = "#a3e4d7"; // Light shading green
+            ctx.fillRect(arda.x - 45, tubeY + 32, 16, 131);
+            ctx.fillRect(arda.x - 55, tubeY + 2, 18, 28);
+            ctx.restore();
+
+            // Screen Top Header info card layout display
+            ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(0, 0, canvas.width, 85);
+            ctx.fillStyle = "#fff"; ctx.font = "bold 26px Arial"; ctx.textAlign = "center";
+            ctx.fillText("VICTORY! SUCKED INTO THE WARP PIPE!", canvas.width / 2, 50);
+        }
+
+        function gameLoop() {
+            if (gameState === 'LOADING') {
+                ctx.fillStyle = "#1a252f"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "white"; ctx.font = "bold 28px Arial"; ctx.textAlign = "center";
+                ctx.fillText("LOADING SUPER SAVO BROTHERS...", canvas.width / 2, canvas.height / 2 - 20);
+                
+                loadingProgress += 1.5;
+                if (loadingProgress > 100) loadingProgress = 100;
+
+                ctx.strokeStyle = "white"; ctx.lineWidth = 2; ctx.strokeRect(canvas.width / 2 - 150, canvas.height / 2 + 10, 300, 20);
+                ctx.fillStyle = "#00e5ff"; ctx.fillRect(canvas.width / 2 - 148, canvas.height / 2 + 12, (loadingProgress / 100) * 296, 16);
+
+                if (loadingProgress >= 100) {
+                    ctx.fillStyle = "#2ecc71"; ctx.font = "16px Arial";
+                    ctx.fillText("PRESS ENTER TO CONTINUE", canvas.width / 2, canvas.height / 2 + 65);
+                }
+                requestAnimationFrame(gameLoop);
+                return;
+            }
+
+            if (gameState === 'MENU') {
+                ctx.fillStyle = "#2c3e50"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "#f1c40f"; ctx.font = "bold 38px Arial"; ctx.textAlign = "center";
+                ctx.fillText("SUPER SAVO BROTHERS", canvas.width / 2, 70);
+
+                ctx.fillStyle = "white"; ctx.font = "bold 20px Arial"; ctx.textAlign = "left";
+                ctx.fillText("🕹️ GAME CONTROLS:", 150, 140);
+                
+                ctx.font = "16px Arial";
+                ctx.fillText("• VLAD:  Arrow Keys to Move/Jump | SHIFT to Throw Coin Bag", 150, 180);
+                ctx.fillText("• OLIVER: W, A, D Keys to Move/Jump | Q to Shoot Pistol Gun", 150, 210);
+                
+                ctx.fillStyle = "#bdc3c7"; ctx.font = "bold 18px Arial";
+                ctx.fillText("🎯 OBJECTIVE:", 150, 260);
+                ctx.font = "15px Arial";
+                ctx.fillText("Defeat Giant Arda, then attack Sirac's cell bars to shatter them!", 150, 290);
+
+                ctx.fillStyle = "#2ecc71"; ctx.font = "bold 22px Arial"; ctx.textAlign = "center";
+                ctx.fillText("PRESS ENTER TO START GAME", canvas.width / 2, 370);
+                
+                requestAnimationFrame(gameLoop);
+                return;
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Ground floor layout logic
+            ctx.fillStyle = "#4caf50"; ctx.fillRect(0, GROUND_Y + 18, canvas.width, canvas.height - GROUND_Y);
+            ctx.lineWidth = 4; ctx.strokeStyle = "#000"; ctx.beginPath(); ctx.moveTo(0, GROUND_Y + 18); ctx.lineTo(canvas.width, GROUND_Y + 18); ctx.stroke();
+
+            // Castle Complex Backdrop units
+            ctx.lineWidth = 4; ctx.strokeStyle = "#000"; ctx.fillStyle = "#7f8c8d";
+            ctx.fillRect(680, GROUND_Y - 60, 110, 80); ctx.strokeRect(680, GROUND_Y - 60, 110, 80);
+            ctx.fillStyle = "#000"; ctx.fillRect(715, GROUND_Y + 2, 40, 18);
+            ctx.fillStyle = "#95a5a6"; ctx.fillRect(690, GROUND_Y - 150, 100, 90); ctx.strokeRect(690, GROUND_Y - 150, 100, 90);
+
+            if (!cellGate.broken) {
+                ctx.strokeStyle = "#555"; ctx.lineWidth = 4;
+                for (let i = 705; i < 790; i += 18) {
+                    ctx.beginPath(); ctx.moveTo(i, GROUND_Y - 150); ctx.lineTo(i, GROUND_Y - 60); ctx.stroke();
+                }
+                if (arda.dead) {
+                    ctx.fillStyle = "white"; ctx.font = "bold 11px Arial"; ctx.textAlign = "center";
+                    ctx.fillText(`BARS HP: ${cellGate.hp}`, 740, GROUND_Y - 160);
+                }
+            }
+
+            let camX = 705; let camY = GROUND_Y - 135;
+            ctx.strokeStyle = "#000"; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(690, camY); ctx.lineTo(camX, camY); ctx.stroke();
+            ctx.fillStyle = "#00e5ff"; ctx.fillRect(camX, camY - 8, 22, 14); ctx.strokeRect(camX, camY - 8, 22, 14);
+            ctx.fillStyle = "#000"; ctx.fillRect(camX + 22, camY - 4, 5, 7);
+            ctx.fillStyle = "#00e5ff"; ctx.font = "bold 11px Arial"; ctx.textAlign = "center"; ctx.fillText("cady VPN", camX + 10, camY - 14);
+
+            if (gameState === 'CUTSCENE') {
+                handleCutscene();
+                requestAnimationFrame(gameLoop);
+                return;
+            }
+
+            // Normal Gameplay Engine Processing
+            updateCharacter(vlad, "ArrowLeft", "ArrowRight", "ArrowUp");
+            updateCharacter(oliver, "a", "d", "w");
+
+            if (!arda.dead) {
+                arda.x += arda.speed * arda.dir;
+                if (arda.x < 250) arda.dir = 1;
+                if (arda.x > 600) arda.dir = -1;
+            }
+
+            // Oliver bullets handler
+            ctx.fillStyle = "#000";
+            for(let i = bullets.length - 1; i >= 0; i--) {
+                bullets[i].x += bullets[i].vx;
+                ctx.fillRect(bullets[i].x, bullets[i].y, 8, 4);
+
+                if (!arda.dead && bullets[i].x > arda.x - 30 && bullets[i].x < arda.x + 30 && bullets[i].y > arda.y - 120) {
+                    hitBoss(6); bullets.splice(i, 1); continue;
+                }
+                if (bullets[i].x > 680 && bullets[i].y < GROUND_Y - 60 && !cellGate.broken && arda.dead) {
+                    hitCellGate(3); bullets.splice(i, 1); continue;
+                }
+                if (bullets[i].x > canvas.width) bullets.splice(i, 1);
+            }
+
+            // Vlad Coin Bags handler
+            for(let i = coinBags.length - 1; i >= 0; i--) {
+                coinBags[i].x += coinBags[i].vx; coinBags[i].y += coinBags[i].vy; coinBags[i].vy += 0.4;
+
+                ctx.fillStyle = "#f1c40f"; ctx.beginPath(); ctx.arc(coinBags[i].x, coinBags[i].y, 9, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = "#000"; ctx.lineWidth = 2; ctx.stroke();
+
+                let popped = false;
+                if (!arda.dead && coinBags[i].x > arda.x - 40 && coinBags[i].x < arda.x + 40 && coinBags[i].y > arda.y - 120) {
+                    hitBoss(12); popped = true;
+                }
+                if (coinBags[i].x > 680 && coinBags[i].y < GROUND_Y - 60 && !cellGate.broken && arda.dead) {
+                    hitCellGate(6); popped = true;
+                }
+                if (coinBags[i].y > GROUND_Y + 15) popped = true;
+
+                if (popped) {
+                    triggerCoinSplash(coinBags[i].x, Math.min(coinBags[i].y, GROUND_Y + 10));
+                    coinBags.splice(i, 1);
+                }
+            }
+
+            // Splashed mini bouncing coins
+            for (let i = miniCoins.length - 1; i >= 0; i--) {
+                miniCoins[i].x += miniCoins[i].vx; miniCoins[i].y += miniCoins[i].vy; miniCoins[i].vy += 0.5;
+
+                if (miniCoins[i].y >= GROUND_Y + 12) {
+                    miniCoins[i].y = GROUND_Y + 12;
+                    miniCoins[i].vy = -miniCoins[i].vy * 0.5;
+                    miniCoins[i].vx *= 0.7; miniCoins[i].bounces++;
+                }
+
+                ctx.fillStyle = "#f39c12"; ctx.beginPath(); ctx.arc(miniCoins[i].x, miniCoins[i].y, 4, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.stroke();
+
+                if (!arda.dead && Math.abs(miniCoins[i].x - arda.x) < 35 && miniCoins[i].y > arda.y - 110) {
+                    hitBoss(1); playSound('coin'); miniCoins.splice(i, 1); continue;
+                }
+                if (miniCoins[i].bounces > 4 || miniCoins[i].x > canvas.width || miniCoins[i].x < 0) {
+                    miniCoins.splice(i, 1);
+                }
+            }
+
+            // Hazard Pencil Lines handler
+            ctx.fillStyle = "rgba(0, 0, 0, 0.8)";
+            for (let i = 0; i < drawnLines.length; i++) {
+                ctx.beginPath(); ctx.arc(drawnLines[i].x, drawnLines[i].y, drawnLines[i].r, 0, Math.PI * 2); ctx.fill();
+                if (checkCollision(vlad, drawnLines[i].x, drawnLines[i].y, 15)) { vlad.dead = true; playSound('hit'); }
+                if (checkCollision(oliver, drawnLines[i].x, drawnLines[i].y, 15)) { oliver.dead = true; playSound('hit'); }
+            }
+            if (drawnLines.length > 60) drawnLines.shift();
+
+            // Core Actors rendering phase
+            drawSketchStickman(vlad, 1);
+            drawSketchStickman(oliver, 1);
+            drawGiantArda(); 
+            drawSketchStickman(sirac, 1);
+
+            // Hitbox checks
+            if (!arda.dead) {
+                if (checkCollision(vlad, arda.x, arda.y - 40, 50)) { vlad.dead = true; playSound('hit'); }
+                if (checkCollision(oliver, arda.x, arda.y - 40, 50)) { oliver.dead = true; playSound('hit'); }
+            }
+
+            // Game Over validation
+            if (vlad.dead && oliver.dead) {
+                ctx.fillStyle = "rgba(139, 0, 0, 0.9)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "#fff"; ctx.font = "bold 36px Arial"; ctx.textAlign = "center";
+                ctx.fillText("GAME OVER", canvas.width / 2, canvas.height / 2);
+                return;
+            }
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        gameLoop();
+    </script>
+</body>
+</html>
